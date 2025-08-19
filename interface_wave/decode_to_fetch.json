@@ -1,0 +1,17 @@
+{
+  "signal": [
+    { "name": "clk",            "wave": "p............." },
+    { "name": "rst_n",          "wave": "10............" },
+    { "name": "valid",          "wave":"0..1.....0"},
+    { "name": "next_addr",      "wave": "x..23.45.6x",
+    "data": ["A0", "A1", "A2", "A3", "A4"]}, 
+    { "name": "cmd_new",        "wave": "0..10....." },
+    {},
+    { "name": "next",           "wave": "0.1.01.01..." },
+    { "name": "ready",          "wave": "0.1.01.01..." },
+    { "name": "addr",           "wave": "0....34.567", 
+    "data": ["A0", "A1", "A2", "A3", "A4"]},
+    { "name": "data",           "wave": "0....34.567", 
+    "data": ["D0", "D1", "D2", "D3", "D4"]}
+  ]
+}

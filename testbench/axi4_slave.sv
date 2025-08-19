@@ -2,66 +2,128 @@ module axi_slave_test #(
     parameter ADDR_WIDTH = 40,
     parameter DATA_WIDTH = 128,
     parameter ID_WIDTH   = 4,
-    parameter ADDR_LOW_BOUND = 40'h0000_0000_0000,
-    parameter ADDR_HIGH_BOUND = 40'h0000_00FF_FFFF,
+    parameter ADDR_LOW_BOUND = 40'h0000_0001_0000,
+    parameter ADDR_HIGH_BOUND = 40'h0000_001_FFFF,
     parameter RANDOM_RESP_ERR_PROB = 5,
-    parameter BURST_LEN_MAX = 16
+    parameter BURST_LEN_MAX = 16,
+    parameter MEM_FILE = ""
 )(
-    input  wire                      ACLK,
-    input  wire                      ARESETn,
+    input  logic                        ACLK,
+    input  logic                        ARESETn,
 
-    // Write Address Channel
-    input  wire [ID_WIDTH-1:0]       AWID,
-    input  wire [ADDR_WIDTH-1:0]     AWADDR,
-    input  wire [7:0]                AWLEN,
-    input  wire [2:0]                AWSIZE,
-    input  wire [1:0]                AWBURST,
-    input  wire [1:0]                AWLOCK,
-    input  wire [3:0]                AWCACHE,
-    input  wire [2:0]                AWPROT,
-    input  wire [3:0]                AWQOS,
-    input  wire [3:0]                AWREGION,
-    input  wire                      AWVALID,
-    output reg                       AWREADY,
+    //============================
+    // Write Address Channel (AW)
+    //============================
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWID" *)
+    input  logic [ID_WIDTH-1:0]         AWID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWADDR" *)
+    input  logic [ADDR_WIDTH-1:0]       AWADDR,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWLEN" *)
+    input  logic [7:0]                  AWLEN,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWSIZE" *)
+    input  logic [2:0]                  AWSIZE,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWBURST" *)
+    input  logic [1:0]                  AWBURST,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWLOCK" *)
+    input  logic [1:0]                  AWLOCK,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWCACHE" *)
+    input  logic [3:0]                  AWCACHE,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWPROT" *)
+    input  logic [2:0]                  AWPROT,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWQOS" *)
+    input  logic [3:0]                  AWQOS,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWREGION" *)
+    input  logic [3:0]                  AWREGION,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWVALID" *)
+    input  logic                        AWVALID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST AWREADY" *)
+    output logic                        AWREADY,
 
-    // Write Data Channel
-    input  wire [DATA_WIDTH-1:0]     WDATA,
-    input  wire [DATA_WIDTH/8-1:0]   WSTRB,
-    input  wire                      WLAST,
-    input  wire                      WVALID,
-    output reg                       WREADY,
+    //=======================
+    // Write Data Channel (W)
+    //=======================
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST WDATA" *)
+    input  logic [DATA_WIDTH-1:0]       WDATA,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST WSTRB" *)
+    input  logic [DATA_WIDTH/8-1:0]     WSTRB,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST WLAST" *)
+    input  logic                        WLAST,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST WVALID" *)
+    input  logic                        WVALID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST WREADY" *)
+    output logic                        WREADY,
 
-    // Write Response Channel
-    output reg  [ID_WIDTH-1:0]       BID,
-    output reg  [1:0]                BRESP,
-    output reg                       BVALID,
-    input  wire                      BREADY,
+    //==========================
+    // Write Response Channel (B)
+    //==========================
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST BID" *)
+    output logic [ID_WIDTH-1:0]         BID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST BRESP" *)
+    output logic [1:0]                  BRESP,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST BVALID" *)
+    output logic                        BVALID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST BREADY" *)
+    input  logic                        BREADY,
 
-    // Read Address Channel
-    input  wire [ID_WIDTH-1:0]       ARID,
-    input  wire [ADDR_WIDTH-1:0]     ARADDR,
-    input  wire [7:0]                ARLEN,
-    input  wire [2:0]                ARSIZE,
-    input  wire [1:0]                ARBURST,
-    input  wire [1:0]                ARLOCK,
-    input  wire [3:0]                ARCACHE,
-    input  wire [2:0]                ARPROT,
-    input  wire [3:0]                ARQOS,
-    input  wire [3:0]                ARREGION,
-    input  wire                      ARVALID,
-    output reg                       ARREADY,
+    //============================
+    // Read Address Channel (AR)
+    //============================
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARID" *)
+    input  logic [ID_WIDTH-1:0]         ARID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARADDR" *)
+    input  logic [ADDR_WIDTH-1:0]       ARADDR,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARLEN" *)
+    input  logic [7:0]                  ARLEN,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARSIZE" *)
+    input  logic [2:0]                  ARSIZE,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARBURST" *)
+    input  logic [1:0]                  ARBURST,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARLOCK" *)
+    input  logic [1:0]                  ARLOCK,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARCACHE" *)
+    input  logic [3:0]                  ARCACHE,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARPROT" *)
+    input  logic [2:0]                  ARPROT,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARQOS" *)
+    input  logic [3:0]                  ARQOS,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARREGION" *)
+    input  logic [3:0]                  ARREGION,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARVALID" *)
+    input  logic                        ARVALID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST ARREADY" *)
+    output logic                        ARREADY,
 
-    // Read Data Channel
-    output reg  [ID_WIDTH-1:0]       RID,
-    output reg  [DATA_WIDTH-1:0]     RDATA,
-    output reg  [1:0]                RRESP,
-    output reg                       RLAST,
-    output reg                       RVALID,
-    input  wire                      RREADY
+    //========================
+    // Read Data Channel (R)
+    //========================
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST RID" *)
+    output logic [ID_WIDTH-1:0]         RID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST RDATA" *)
+    output logic [DATA_WIDTH-1:0]       RDATA,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST RRESP" *)
+    output logic [1:0]                  RRESP,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST RLAST" *)
+    output logic                        RLAST,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST RVALID" *)
+    output logic                        RVALID,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI_TEST RREADY" *)
+    input  logic                        RREADY
 );
 
     localparam MEM_DEPTH = (ADDR_HIGH_BOUND - ADDR_LOW_BOUND + 1) >> 4;
     reg [DATA_WIDTH-1:0] mem [0:MEM_DEPTH-1];
+
+    initial begin
+        if (MEM_FILE == "") begin
+            foreach (mem[i]) begin
+                mem[i] = $urandom;
+            end
+        end
+        else begin
+            $readmemh(MEM_FILE, mem);
+        end
+        
+    end
 
     reg [15:0] rand_lfsr;
     wire [15:0] rand_next = {rand_lfsr[14:0], rand_lfsr[15] ^ rand_lfsr[13] ^ rand_lfsr[12] ^ rand_lfsr[10]};
@@ -176,13 +238,6 @@ module axi_slave_test #(
         end else if (BVALID && BREADY) begin
             BVALID <= 0;
         end
-    end
-
-    // Memory init
-    integer i;
-    initial begin
-        for (i = 0; i < MEM_DEPTH; i = i + 1)
-            mem[i] = {4{$random}};
     end
 
 endmodule
