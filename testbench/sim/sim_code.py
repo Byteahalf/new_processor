@@ -1,34 +1,35 @@
 import os, sys
 import numpy as np
-from .register import register
+from .register import Register, RegisterGroup
 from . import decode
 from .util import *
+from .instr_unit import InstrUnit
 
 MEM_FILE = f"{os.path.dirname(__file__)}/../binary/main.mem"
 
-def addr_to_offset(addr:int) -> int:
-    '''
-    Convert address to memory offset
-    '''
-    return addr // 2
+def addw(rs1: int, imm: int) -> int:
+    """模拟 RISC-V ADDIW 指令"""
+    # 1. 截取 rs1 低 32 位并作为有符号数
+    low32 = to_signed32(rs1)
+    # 2. 执行 32 位加法
+    result32 = to_signed32(low32 + imm)
+    # 3. 符号扩展到 64 位
+    return sign_extend_32_to_64(result32)
 
-def offset_to_addr(offset:int) -> int:
-    '''
-    Convert memory offset to address
-    '''
-    return offset * 2
 
 def core(mem):
     ############
     # Register #
     ############
-    gpr = register(32, zero=True)
-    fpr = register(32, zero=False)
-    vpr = register(32, zero=False)
+    gpr = Register(32, zero=True)
+    fpr = Register(32, zero=False)
+    vpr = Register(32, zero=False)
 
-    ################
-    # Read Program #
-    ################
+    regs = RegisterGroup(gpr, fpr, vpr)
+
+    ##############
+    # DEASSEMBLY #
+    ##############
     i = 0
     addr = 0
     human_code = []
@@ -52,27 +53,49 @@ def core(mem):
     with open("main.asm", "w", encoding='utf-8') as f:
         f.write('\n'.join(human_code))
 
+    #######
+    # RUN #
+    #######
+
+    # DECODE -> DECODE_PENDING (OPT) -> EXEC -> WRITEBACK
+    # 从后往前更新
+
+    # ALU
+    # A: { RS1, PC, MEMRD, CSR_RD }
+    # B: { RS2, IMM, RS1 }
+    # R: { GPR, CSR_WR, PC, LSU, }
+
     next_addr = 0
-    decode_list = []
-    exec_list = []
-    pending_list = []
+
+
+
     while(True):
-        next_addr_t = next_addr
-        next_addr_l = []
-        for i in range(4):
-            if mem[next_addr_t] & 0b11 == 3:
-                decode_list.append(decode_full((mem[next_addr_t+1] << 16) + mem[next_addr_t]))
-                next_addr_t += 2
-                next_addr_l.append(next_addr_t)
+        # Write Back Update
+        for instr in write_back_list:
+            for dst in instr.dst:
+                pass
+
+        # Exec Update
+        for instr in exec_list:
+            otype = instr.op.otype
+            op = instr.op.op
+            if otype == 'FLOAT':
+                if op == 'ADD':
+                    instr
+            elif otype == 'INT':
+                if op == 'ADD':
+                     instr.write_dst(wrap(rs1 + op2, xlen))
+                if op == 'ADDW':
+                    instr.write_dst(addw(instr.read_reg(0) &  + instr.read_reg(1)))
+                elif op == 'SUB':
+                    instr.write_dst(instr.read_reg(0) - instr.read_reg(1))
+                elif op == 'ADD'
+            elif instr.op.otype == 'VECTOR':
+                pass
             else:
-                decode_list.append(decode_c(mem[next_addr_t]))
-                next_addr_t += 1
-                next_addr_l.append(next_addr_t)
-        
-        for command in decode_list:
-            # Check source usage
-            if reg_flag[command.src].busy:
-                continue
+                raise NotImplementedError("Execution type error.")
+
+
              
             
 
