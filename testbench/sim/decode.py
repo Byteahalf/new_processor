@@ -1,5 +1,7 @@
 from typing import Tuple, Literal
-from .instr_unit import DataFlow, InstrUnit
+from .instr_unit import ExecType, InstrUnit
+from .instr_unit import AluOpType, AluPortAType, AluPortBType
+from .instr_unit import PCEffectPortAType
 from .moduleConstant import *
 
 # ---------------------------
@@ -22,27 +24,6 @@ def fname(i: int) -> str:
 
 def vname(n): 
     return f"v{n}"
-
-def X(i: int) -> DataFlow:
-    return DataFlow(VTYPE_REGISTER, reg=REG_GPR, reg_id=i)
-
-def F(i: int) -> DataFlow:
-    return DataFlow(VTYPE_REGISTER, reg=REG_FPR, reg_id=i)
-
-def V(i: int) -> DataFlow:
-    return DataFlow(VTYPE_REGISTER, reg=REG_VPR, reg_id=i)
-
-def I(i: int) -> DataFlow:
-    return DataFlow(VTYPE_IMMEDIATE, imm=i)
-
-def MEM(i: int) -> DataFlow:
-    return DataFlow(VTYPE_MEMORY, mem_addr=i)
-
-def PC() -> DataFlow:
-    return DataFlow(VTYPE_PC)
-
-def CSR(i: int) -> DataFlow:
-    return DataFlow(VTYPE_CSR, csr=i)
 
 # ---------------------------
 # Immediate builders (RV32/64)
@@ -91,7 +72,7 @@ class DecodeBlock():
         self.reg = reg
         self.mem = mem
 
-    def decode_32(self, inst: int) -> (str, InstrUnit):
+    def decode_32(self, inst: int, order:int = -1) -> (str, InstrUnit):
         opc = get_bits(inst, 6, 0)
         rd = get_bits(inst, 11, 7)
         funct3 = get_bits(inst, 14, 12)
@@ -107,54 +88,103 @@ class DecodeBlock():
         # Init Instr Entity
         instr = InstrUnit()
 
+        instr.dataflow.pc = -1
+        instr.order = order
+        instr.dataflow.rs1 = rs1
+        instr.dataflow.rs2 = rs2
+        instr.dataflow.rd = rd
+
         # ---- LUI/AUIPC ----
-        if opc == 0x37: # LUI R, I 装载到[31:12]位
+        if opc == 0x37: # LUI rd, imm: rd <= (imm << 12);
             u = imm_u(inst)
-            instr.src.append(I(u))
-            instr.dst.append(X(rd))
-            return f"lui {XR(rd)}, {hex(u)}"
-        if opc == 0x17:
+            instr.alu = ExecType.ALU
+            instr.op = AluOpType.ADD
+            instr.dataflow.rs1 = 0
+            instr.dataflow.imm = u
+            instr.mux_A = AluPortAType.RS1
+            instr.mux_B = AluPortBType.IMM
+            return f"lui {XR(rd)}, {hex(u)}", instr
+        if opc == 0x17: # AUIPC rd, imm: rd <= pc + (imm << 12);
             u = imm_u(inst)
-            instr.src.extend([PC(), I(u)])         # PC + imm20<<12
-            instr.dst.append(X(rd))
-            return f"auipc {XR(rd)}, {hex(imm_u(inst))}"
+            instr.alu = ExecType.ALU
+            instr.op = AluOpType.ADD
+            instr.dataflow.imm = u
+            instr.mux_A = AluPortAType.PC
+            instr.mux_B = AluPortBType.IMM
+            return f"auipc {XR(rd)}, {hex(imm_u(inst))}", instr
 
         # ---- Jumps ----
-        if opc == 0x6F:
+        if opc == 0x6F: # JAL rd, offset: rd <= pc + 4; pc <= pc + offset
             off = imm_j(inst)
-            instr.src.extend([PC(0), I(off)])       # target = PC + off
-            instr.dst.append(X(rd))                 # rd gets return addr
-            return f"jal {XR(rd)}, {hex(imm_j(inst))}"
-        if opc == 0x67:
+            instr.alu = ExecType.ALU
+            instr.op = AluOpType.ADD
+            instr.dataflow.imm = 4
+            instr.dataflow.offset = off
+            instr.mux_A = AluPortAType.PC
+            instr.mux_B = AluPortBType.IMM
+            instr.pc_effect.valid = True
+            instr.pc_effect.mux_A = PCEffectPortAType.PC
+            return f"jal {XR(rd)}, {hex(imm_j(inst))}", instr
+        if opc == 0x67: # JALR rd, offset(rs1): rd <= pc + 4; pc <= (rs1 + offset) & ~1
             if funct3 == 0:
-                return f"jalr {XR(rd)}, {hex(imm_i(inst))}({XR(rs1)})"
+                off = imm_i(inst)
+                instr.alu = ExecType.ALU
+                instr.op = AluOpType.ADD
+                instr.dataflow.imm = 4
+                instr.dataflow.offset = off
+                instr.mux_A = AluPortAType.PC
+                instr.mux_B = AluPortBType.IMM
+                instr.pc_effect.valid = True
+                instr.pc_effect.mux_A = PCEffectPortAType.RS1
+                return f"jalr {XR(rd)}, {hex(imm_i(inst))}({XR(rs1)})", instr
+            else:
+                raise NotImplementedError("Decoder: Decode Error")
 
         # ---- Branches ----
         if opc == 0x63:
             off = imm_b(inst)
+            instr.alu = ExecType.BRANCH
+            instr.op = funct3
+            instr.dataflow.offset = off
+            instr.pc_effect.valid = True
+            instr.pc_effect.mux_A = PCEffectPortAType.PC
             m = {0: "beq", 1: "bne", 4: "blt", 5: "bge", 6: "bltu", 7: "bgeu"}
             if funct3 in m:
-                return f"{m[funct3]} {XR(rs1)}, {XR(rs2)}, {hex(off)}"
+                return f"{m[funct3]} {XR(rs1)}, {XR(rs2)}, {hex(off)}", instr
 
         # ---- Loads (I) ----
         if opc == 0x03:
             off = imm_i(inst)
+            instr.alu = ExecType.LSU
+            instr.lsu_op = (funct3 << 2) + 0b10
+            instr.dataflow.offset = off
+            
             m = {
                 0: "lb", 1: "lh", 2: "lw", 3: "ld", 4: "lbu", 5: "lhu", 6: "lwu"
             }
             if funct3 in m:
-                return f"{m[funct3]} {XR(rd)}, {hex(off)}({XR(rs1)})"
+                return f"{m[funct3]} {XR(rd)}, {hex(off)}({XR(rs1)})", instr
+            else:
+                raise NotImplementedError("Decoder: Decode Error")
 
         # ---- Stores (S) ----
         if opc == 0x23:
             off = imm_s(inst)
+            instr.alu = ExecType.LSU
+            instr.lsu_op = (funct3 << 2) + 0b01
+            instr.dataflow.offset = off
             m = {0: "sb", 1: "sh", 2: "sw", 3: "sd"}
             if funct3 in m:
                 return f"{m[funct3]} {XR(rs2)}, {hex(off)}({XR(rs1)})"
 
         # ---- OP-IMM (I) ----
+        
         if opc == 0x13:
             imm = imm_i(inst)
+            instr.alu = ExecType.ALU
+
+            m = {0: 'ADDI', 1: 'SLLI', 2: 'SLRI', 3: 'SLTU', 4: 'XORI', 5: 'SRLI', 6: 'ORI', 7: 'ANDI', 8: 'SUBI', 13: 'SRA'}
+
             if funct3 == 0:
                 return f"addi {XR(rd)}, {XR(rs1)}, {hex(imm)}"
             if funct3 == 2:
