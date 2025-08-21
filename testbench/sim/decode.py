@@ -178,52 +178,61 @@ class DecodeBlock():
                 return f"{m[funct3]} {XR(rs2)}, {hex(off)}({XR(rs1)})"
 
         # ---- OP-IMM (I) ----
-        
         if opc == 0x13:
             imm = imm_i(inst)
-            instr.alu = ExecType.ALU
-
-            m = {0: 'ADDI', 1: 'SLLI', 2: 'SLRI', 3: 'SLTU', 4: 'XORI', 5: 'SRLI', 6: 'ORI', 7: 'ANDI', 8: 'SUBI', 13: 'SRA'}
-
-            if funct3 == 0:
-                return f"addi {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 2:
-                return f"slti {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 3:
-                return f"sltiu {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 4:
-                return f"xori {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 6:
-                return f"ori {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 7:
-                return f"andi {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 1 and get_bits(inst, 31, 26) == 0:
-                shamt = get_bits(inst, 25, 20)
-                return f"slli {XR(rd)}, {XR(rs1)}, {shamt}"
-            if funct3 == 5:
-                shamt = get_bits(inst, 25, 20)
-                if get_bits(inst, 31, 26) == 0:
-                    return f"srli {XR(rd)}, {XR(rs1)}, {shamt}"
-                if get_bits(inst, 31, 26) == 0b010000:
-                    return f"srai {XR(rd)}, {XR(rs1)}, {shamt}"
+            shamt = shamt = get_bits(inst, 25, 20)
+            opcode = (get_bits(30, 30) << 3) + funct3
+            mop = {0: 'addi', 2: 'stli', 3: 'sltiu', 4: 'xori', 6: 'ori', 7: 'andi', 8: 'subi'}
+            sop = {1: 'slli', 5: 'srli', 13: 'srai'}
+            if opcode not in mop.keys() and opcode not in sop.keys():
+                raise NotImplementedError("Decoder: Decode Error")
+            if opcode in mop.keys():
+                instr.alu = ExecType.ALU
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                instr.dataflow.imm = imm
+                return f"{mop[opcode]}, {XR(rd)}, {XR(rs1)}, {hex(imm)}", instr
+            if opcode in sop.keys():
+                if get_bits(inst, 31, 31) != 0 or get_bits(inst, 29, 26) != 0:
+                    raise NotImplementedError("Decoder: Decode Error")
+                instr.alu = ExecType.ALU
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                instr.dataflow.imm = shamt
+                return f"{sop[opcode]} {XR(rd)}, {XR(rs1)}, {shamt}"
 
         # ---- OP-IMM-32 (RV64) ----
         if opc == 0x1B:
             imm = imm_i(inst)
-            if funct3 == 0:
-                return f"addiw {XR(rd)}, {XR(rs1)}, {hex(imm)}"
-            if funct3 == 1 and get_bits(inst, 31, 25) == 0:
-                shamt = get_bits(inst, 24, 20)
-                return f"slliw {XR(rd)}, {XR(rs1)}, {shamt}"
-            if funct3 == 5:
-                shamt = get_bits(inst, 24, 20)
-                if get_bits(inst, 31, 25) == 0:
-                    return f"srliw {XR(rd)}, {XR(rs1)}, {shamt}"
-                if get_bits(inst, 31, 25) == 0b0100000:
-                    return f"sraiw {XR(rd)}, {XR(rs1)}, {shamt}"
+            shamt = get_bits(inst, 24, 20)
+            opcode = (1 << 4) + (get_bits(30, 30) << 3) + funct3
+            mop = {16: 'addiw'}
+            sop = {17: 'slliw', 21: 'srliw', 29: 'sraiw'}
+            if opcode not in mop.keys() and opcode not in sop.keys():
+                raise NotImplementedError("Decoder: Decode Error")
+            if opcode in mop.keys():
+                instr.alu = ExecType.ALU
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                instr.dataflow.imm = imm
+                return f"{mop[opcode]}, {XR(rd)}, {XR(rs1)}, {hex(imm)}", instr
+            if opcode in sop.keys():
+                if get_bits(inst, 31, 31) != 0 or get_bits(inst, 29, 26) != 0:
+                    raise NotImplementedError("Decoder: Decode Error")
+                instr.alu = ExecType.ALU
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                instr.dataflow.imm = shamt
+                return f"{sop[opcode]} {XR(rd)}, {XR(rs1)}, {shamt}"
 
         # ---- OP (R) ----
         if opc == 0x33:
+            opcode = (1 << 4) + (get_bits(30, 30) << 3) + funct3
+            m = {
+                    0: "add", 1: "sll", 2: "slt", 3: "sltu",
+                    4: "xor", 5: "srl", 6: "or", 7: "and", 
+                    8: "sub", 13: "sra"
+                }
             if funct7 == 0x00:
                 m = {
                     0: "add", 1: "sll", 2: "slt", 3: "sltu",

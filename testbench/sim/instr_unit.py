@@ -26,21 +26,26 @@ class AluOpType(Enum):
     '''
     SRA 特殊值1 算术右移补符号位 
     SUB 特殊值1 
+    | 4 |    3    | 2-0 |
+    | W | SUB/SRA |  OP |
     '''
     ERROR = -1
     
-    ADD = 0b0000
-    SLL = 0b0001
-    SLR = 0b0010
-    SLTU = 0b0011
-    XOR = 0b0100
-    SRL = 0b0101
-    OR = 0b0110
-    AND = 0b0111
+    ADD = 0b000
+    SLL = 0b001
+    SLR = 0b010
+    SLTU = 0b011
+    XOR = 0b100
+    SRL = 0b101
+    OR = 0b110
+    AND = 0b111
     SUB = 0b1000
     SRA = 0b1101
-
-    
+    ADDW = 0b10000
+    SUBW = 0b11000
+    SLLW = 0b10001
+    SRLW = 0b10101
+    SRAW = 0b11101
 
 class AluPortAType():
     RS1 = auto()
