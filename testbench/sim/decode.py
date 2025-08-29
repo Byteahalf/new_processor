@@ -1,6 +1,10 @@
-from typing import Tuple, Literal
-from .instr_unit import ExecType, InstrUnit
+from typing import Tuple, Literal, Optional
+from .instr_unit import ExecType, InstrUnit, RegisterType
 from .instr_unit import AluOpType, AluPortAType, AluPortBType
+from .instr_unit import MduOpType
+from .instr_unit import LsuOpType
+from .instr_unit import BranchOpType
+from .instr_unit import CsrOpType
 from .instr_unit import PCEffectPortAType
 from .moduleConstant import *
 
@@ -24,6 +28,10 @@ def fname(i: int) -> str:
 
 def vname(n): 
     return f"v{n}"
+
+XR = xname
+FR = fname
+VR = vname
 
 # ---------------------------
 # Immediate builders (RV32/64)
@@ -68,17 +76,18 @@ def is_compressed(inst: int) -> bool:
 # ---------------------------
 
 class DecodeBlock():
-    def __init__(self, reg, mem):
-        self.reg = reg
-        self.mem = mem
+    def __init__(self):
+        self.intp = False
 
-    def decode_32(self, inst: int, order:int = -1) -> (str, InstrUnit):
+    def decode_32(self, inst: int, pc: int = -1, order: int = -1) -> tuple[str, InstrUnit]:
         opc = get_bits(inst, 6, 0)
         rd = get_bits(inst, 11, 7)
         funct3 = get_bits(inst, 14, 12)
         rs1 = get_bits(inst, 19, 15)
         rs2 = get_bits(inst, 24, 20)
+        rs3 = get_bits(inst, 31, 27)
         funct7 = get_bits(inst, 31, 25)
+        csr = get_bits(inst, 31, 20)
 
         # Common names
         XR = xname
@@ -88,21 +97,22 @@ class DecodeBlock():
         # Init Instr Entity
         instr = InstrUnit()
 
-        instr.dataflow.pc = -1
+        instr.dataflow.pc = pc
         instr.order = order
         instr.dataflow.rs1 = rs1
         instr.dataflow.rs2 = rs2
+        instr.dataflow.rs3 = rs3
         instr.dataflow.rd = rd
+        instr.dataflow.csr = csr
 
         # ---- LUI/AUIPC ----
         if opc == 0x37: # LUI rd, imm: rd <= (imm << 12);
             u = imm_u(inst)
             instr.alu = ExecType.ALU
-            instr.op = AluOpType.ADD
-            instr.dataflow.rs1 = 0
+            instr.op = AluOpType.BYPASS
             instr.dataflow.imm = u
-            instr.mux_A = AluPortAType.RS1
-            instr.mux_B = AluPortBType.IMM
+            instr.mux_A = AluPortAType.IMM
+            instr.mux_B = AluPortBType.EMPTY
             return f"lui {XR(rd)}, {hex(u)}", instr
         if opc == 0x17: # AUIPC rd, imm: rd <= pc + (imm << 12);
             u = imm_u(inst)
@@ -132,6 +142,7 @@ class DecodeBlock():
                 instr.op = AluOpType.ADD
                 instr.dataflow.imm = 4
                 instr.dataflow.offset = off
+                instr.req.rs1 = True
                 instr.mux_A = AluPortAType.PC
                 instr.mux_B = AluPortBType.IMM
                 instr.pc_effect.valid = True
@@ -141,10 +152,16 @@ class DecodeBlock():
                 raise NotImplementedError("Decoder: Decode Error")
 
         # ---- Branches ----
+        # BEQ rs1, rs2, off: if (rs1 == rs2) PC += off
+        # BNE rs1, rs2, off: if (rs1 != rs2) PC += off
+        # BLT rs1, rs2, off: if (sext(rs1) < sext(rs2)) PC += off
+        # BGE rs1, rs2, off: if (sext(rs1) >= sext(rs2)) PC += off
+        # BLTU rs1, rs2, off: if (rs1 < rs2) PC += off
+        # BGEU rs1, rs2, off: if (rs1 >= rs2) PC += off
         if opc == 0x63:
             off = imm_b(inst)
             instr.alu = ExecType.BRANCH
-            instr.op = funct3
+            instr.op = BranchOpType(funct3)
             instr.dataflow.offset = off
             instr.pc_effect.valid = True
             instr.pc_effect.mux_A = PCEffectPortAType.PC
@@ -153,10 +170,14 @@ class DecodeBlock():
                 return f"{m[funct3]} {XR(rs1)}, {XR(rs2)}, {hex(off)}", instr
 
         # ---- Loads (I) ----
+        # Lx rd, off(rs1): rd = sext8 ( M8[rs1+off] )
         if opc == 0x03:
             off = imm_i(inst)
             instr.alu = ExecType.LSU
-            instr.lsu_op = (funct3 << 2) + 0b10
+            instr.op = AluOpType.BYPASS
+            instr.req.rs1 = True
+            instr.lsu_dataflow.op = (funct3 << 2) + 0b10
+            instr.lsu_dataflow.region = RegisterType.GPR
             instr.dataflow.offset = off
             
             m = {
@@ -168,10 +189,14 @@ class DecodeBlock():
                 raise NotImplementedError("Decoder: Decode Error")
 
         # ---- Stores (S) ----
+        # Sx rs2, off(rs1): MEM8b [rs1+off] = rs2[7:0]
         if opc == 0x23:
             off = imm_s(inst)
             instr.alu = ExecType.LSU
-            instr.lsu_op = (funct3 << 2) + 0b01
+            instr.op = AluOpType.BYPASS
+            instr.req.rs1 = True
+            instr.lsu_dataflow.op = (funct3 << 2) + 0b01
+            instr.lsu_dataflow.region = RegisterType.GPR
             instr.dataflow.offset = off
             m = {0: "sb", 1: "sh", 2: "sw", 3: "sd"}
             if funct3 in m:
@@ -181,21 +206,25 @@ class DecodeBlock():
         if opc == 0x13:
             imm = imm_i(inst)
             shamt = shamt = get_bits(inst, 25, 20)
-            opcode = (get_bits(30, 30) << 3) + funct3
+            opcode = (get_bits(inst, 30, 30) << 3) + funct3
             mop = {0: 'addi', 2: 'stli', 3: 'sltiu', 4: 'xori', 6: 'ori', 7: 'andi', 8: 'subi'}
             sop = {1: 'slli', 5: 'srli', 13: 'srai'}
-            if opcode not in mop.keys() and opcode not in sop.keys():
+            if opcode not in mop and opcode not in sop:
                 raise NotImplementedError("Decoder: Decode Error")
-            if opcode in mop.keys():
+            if opcode in mop:
                 instr.alu = ExecType.ALU
+                instr.op = AluOpType(opcode)
+                instr.req.rs1 = True
                 instr.mux_A = AluPortAType.RS1
                 instr.mux_B = AluPortBType.IMM
                 instr.dataflow.imm = imm
                 return f"{mop[opcode]}, {XR(rd)}, {XR(rs1)}, {hex(imm)}", instr
-            if opcode in sop.keys():
+            if opcode in sop:
                 if get_bits(inst, 31, 31) != 0 or get_bits(inst, 29, 26) != 0:
                     raise NotImplementedError("Decoder: Decode Error")
                 instr.alu = ExecType.ALU
+                instr.op = AluOpType(opcode)
+                instr.req.rs1 = True
                 instr.mux_A = AluPortAType.RS1
                 instr.mux_B = AluPortBType.IMM
                 instr.dataflow.imm = shamt
@@ -205,95 +234,121 @@ class DecodeBlock():
         if opc == 0x1B:
             imm = imm_i(inst)
             shamt = get_bits(inst, 24, 20)
-            opcode = (1 << 4) + (get_bits(30, 30) << 3) + funct3
+            opcode = (1 << 4) + ((get_bits(inst, 30, 30) << 3) if funct3 != 0 else 0) + funct3
             mop = {16: 'addiw'}
             sop = {17: 'slliw', 21: 'srliw', 29: 'sraiw'}
-            if opcode not in mop.keys() and opcode not in sop.keys():
+            if opcode not in mop and opcode not in sop:
                 raise NotImplementedError("Decoder: Decode Error")
-            if opcode in mop.keys():
+            if opcode in mop:
                 instr.alu = ExecType.ALU
+                instr.op = AluOpType(opcode)
+                instr.req.rs1 = True
                 instr.mux_A = AluPortAType.RS1
                 instr.mux_B = AluPortBType.IMM
                 instr.dataflow.imm = imm
                 return f"{mop[opcode]}, {XR(rd)}, {XR(rs1)}, {hex(imm)}", instr
-            if opcode in sop.keys():
+            if opcode in sop:
                 if get_bits(inst, 31, 31) != 0 or get_bits(inst, 29, 26) != 0:
                     raise NotImplementedError("Decoder: Decode Error")
                 instr.alu = ExecType.ALU
+                instr.op = AluOpType(opcode)
+                instr.req.rs1 = True
                 instr.mux_A = AluPortAType.RS1
                 instr.mux_B = AluPortBType.IMM
                 instr.dataflow.imm = shamt
-                return f"{sop[opcode]} {XR(rd)}, {XR(rs1)}, {shamt}"
+                return f"{sop[opcode]} {XR(rd)}, {XR(rs1)}, {shamt}", instr
 
         # ---- OP (R) ----
         if opc == 0x33:
-            opcode = (1 << 4) + (get_bits(30, 30) << 3) + funct3
-            m = {
-                    0: "add", 1: "sll", 2: "slt", 3: "sltu",
-                    4: "xor", 5: "srl", 6: "or", 7: "and", 
-                    8: "sub", 13: "sra"
-                }
-            if funct7 == 0x00:
-                m = {
-                    0: "add", 1: "sll", 2: "slt", 3: "sltu",
-                    4: "xor", 5: "srl", 6: "or", 7: "and"
-                }
-                if funct3 in m:
-                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
-            if funct7 == 0x20:
-                if funct3 == 0:
-                    return f"sub {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
-                if funct3 == 5:
-                    return f"sra {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
-            # M extension
-            if funct7 == 0x01:
+            if funct7 != 1:
+                opcode = (get_bits(inst, 30, 30) << 3) + funct3
+                m = {0: 'add', 1: 'sll', 2: 'stl', 3: 'sltu', \
+                     4: 'xor', 5: 'srl', 6: 'or', 7: 'and', \
+                     8: 'sub', 13: 'sra'}
+                if get_bits(inst, 31, 31) != 0 or get_bits(inst, 29, 26) != 0:
+                    raise NotImplementedError("Decoder: Decode Error")
+                if opcode in m:
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType(opcode)
+                    instr.req.rs1 = True
+                    instr.req.rs2 = True
+                    instr.mux_A = AluPortAType.RS1
+                    instr.mux_B = AluPortBType.RS2
+                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}", instr
+                raise NotImplementedError("Decoder: Decode Error")
+            else:
+                # M Extension
                 m = {
                     0: "mul", 1: "mulh", 2: "mulhsu", 3: "mulhu",
                     4: "div", 5: "divu", 6: "rem", 7: "remu"
                 }
-                if funct3 in m:
-                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
+                instr.alu = ExecType.MDU
+                instr.op = MduOpType(funct3)
+                instr.req.rs1 = True
+                instr.req.rs2 = True
+                return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}", instr
 
         # ---- OP-32 (RV64 R) ----
         if opc == 0x3B:
-            if funct7 == 0x00:
-                m = {0: "addw", 1: "sllw", 5: "srlw"}
+            if funct7 != 1:
+                opcode = (1 << 4) + (get_bits(inst, 30, 30) << 3) + funct3
+                m = {16: 'addw', 17: 'sllw', 21: 'srlw', 24: 'subw', 29: 'sraw'}
+                if get_bits(inst, 31, 31) != 0 or get_bits(inst, 29, 26) != 0:
+                    raise NotImplementedError("Decoder: Decode Error")
+                if opcode in m:
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType(opcode)
+                    instr.req.rs1 = True
+                    instr.req.rs2 = True
+                    instr.mux_A = AluPortAType.RS1
+                    instr.mux_B = AluPortBType.RS2
+                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}", instr
+                raise NotImplementedError("Decoder: Decode Error")
+            else:
+                # M Extension
+                m = {
+                    0: "mulw",
+                    4: "divw", 5: "divuw", 6: "remw", 7: "remuw"
+                }
+                instr.alu = ExecType.MDU
+                instr.op = MduOpType(funct3)
+                instr.req.rs1 = True
+                instr.req.rs2 = True
                 if funct3 in m:
-                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
-            if funct7 == 0x20:
-                if funct3 == 0:
-                    return f"subw {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
-                if funct3 == 5:
-                    return f"sraw {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
-            if funct7 == 0x01:
-                m = {0: "mulw", 4: "divw", 5: "divuw", 6: "remw", 7: "remuw"}
-                if funct3 in m:
-                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}"
+                    return f"{m[funct3]} {XR(rd)}, {XR(rs1)}, {XR(rs2)}", instr
+                raise NotImplementedError("Decoder: Decode Error")
 
         # ---- SYSTEM / CSR ----
         if opc == 0x73:
             if inst == 0x00000073:
+                self.intp = True
                 return "ecall"
             if inst == 0x00100073:
+                self.intp = True
                 return "ebreak"
             if funct3 in (1, 2, 3):
                 m = {1: "csrrw", 2: "csrrs", 3: "csrrc"}
-                csr = get_bits(inst, 31, 20)
-                return f"{m[funct3]} {XR(rd)}, {hex(csr)}, {XR(rs1)}"
+                instr.alu = ExecType.CSR
+                instr.op = CsrOpType(funct3)
+                instr.req.rs1 = True
+                return f"{m[funct3]} {XR(rd)}, {hex(csr)}, {XR(rs1)}", instr
             if funct3 in (5, 6, 7):
                 m = {5: "csrrwi", 6: "csrrsi", 7: "csrrci"}
-                csr = get_bits(inst, 31, 20)
                 zimm = rs1
-                return f"{m[funct3]} {XR(rd)}, {hex(csr)}, {zimm}"
+                instr.alu = ExecType.CSR
+                instr.op = CsrOpType(funct3)
+                instr.dataflow.imm = zimm
+                return f"{m[funct3]} {XR(rd)}, {hex(csr)}, {zimm}", instr
 
         # ---- FENCE ----
+        # 未完成
         if opc == 0x0F:
             if funct3 == 0:
                 pred = get_bits(inst, 27, 24)
                 succ = get_bits(inst, 23, 20)
-                return f"fence {pred},{succ}"
+                return f"fence {pred},{succ}", None
             if funct3 == 1:
-                return "fence.i"
+                return "fence.i", None
 
         # ---- Atomic (A) LR/SC/AMO ----
         if opc == 0x2F:
@@ -448,15 +503,15 @@ class DecodeBlock():
                 return f"vsetvl {xname(vd)}, {xname(vs1)}, {xname(vs2)}"
 
             # ---- Helpers: pretty print by form (vv/vx/vi, fp or int)
-            def fmt_vv(name):
-                return f"{name} {V(vd)}, {V(vs2)}, {V(vs1)}{vm_suffix(vm)}"
+            def fmt_vvname(name):
+                return f"{name} {vname(vd)}, {vname(vs2)}, {vname(vs1)}{vm_suffix(vm)}"
 
             def fmt_vx(name):
-                return f"{name} {V(vd)}, {V(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
+                return f"{name} {vname(vd)}, {vname(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
 
             def fmt_vi(name):
                 imm5 = get_bits(inst, 19, 15)  # OPIVI immediate
-                return f"{name} {V(vd)}, {V(vs2)}, {imm5}{vm_suffix(vm)}"
+                return f"{name} {vname(vd)}, {vname(vs2)}, {imm5}{vm_suffix(vm)}"
 
             # ---- Integer ALU core (常用全集)
             int_map = {
@@ -566,29 +621,29 @@ class DecodeBlock():
                 # vmv.v.i : OPIVI + funct6==010111
                 if sub == 0b011 and funct6 == 0b010111:
                     imm5 = get_bits(inst, 19, 15)
-                    return f"vmv.v.i {V(vd)}, {imm5}"
+                    return f"vmv.v.i {vname(vd)}, {imm5}"
                 # vmv.v.x : OPMVX + funct6==010111
                 if sub == 0b110 and funct6 == 0b010111:
-                    return f"vmv.v.x {V(vd)}, {xname(vs1)}"
+                    return f"vmv.v.x {vname(vd)}, {xname(vs1)}"
                 # vmv.v.v : OPMVV + funct6==010111
                 if sub == 0b010 and funct6 == 0b010111:
-                    return f"vmv.v.v {V(vd)}, {V(vs2)}"
+                    return f"vmv.v.v {vname(vd)}, {vname(vs2)}"
                 # vmerge.v{v,x,i}
                 if funct6 == 0b010100:
                     if sub == 0b000:
-                        return fmt_vv("vmerge.vv")
+                        return fmt_vvname("vmerge.vv")
                     if sub == 0b100:
                         return fmt_vx("vmerge.vx")
                     if sub == 0b011:
                         return fmt_vi("vmerge.vi")
                 # vslide1up/down（以 vs1 为标量源）
                 if funct6 == 0b001110 and sub == 0b100:
-                    return f"vslide1up.vx {V(vd)}, {V(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
+                    return f"vslide1up.vx {vname(vd)}, {vname(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
                 if funct6 == 0b001111 and sub == 0b100:
-                    return f"vslide1down.vx {V(vd)}, {V(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
+                    return f"vslide1down.vx {vname(vd)}, {vname(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
                 # 浮点移动：vfmv.v.f（OPFVF + 010111），vfmv.f.s（OPMVV/OPMVX 变体，常见汇编别名）
                 if sub == 0b101 and funct6 == 0b010111:
-                    return f"vfmv.v.f {V(vd)}, {fname(vs1)}"
+                    return f"vfmv.v.f {vname(vd)}, {fname(vs1)}"
                 return None
 
             sp = try_special()
@@ -599,16 +654,16 @@ class DecodeBlock():
             if sub == 0b000:  # OPIVV
                 name = int_map.get(funct6)
                 if name:
-                    return fmt_vv(f"{name}.vv")
+                    return fmt_vvname(f"{name}.vv")
                 # FP vv
                 name = fp_map.get(funct6)
                 if name:
-                    return fmt_vv(f"{name}.vv")
+                    return fmt_vvname(f"{name}.vv")
                 # Moves/perms
                 name = mv_perm_map.get(funct6)
                 if name:
-                    return fmt_vv(f"{name}.vv")
-                return f"vop(fun6=0b{funct6:06b}).vv {V(vd)}, {V(vs2)}, {V(vs1)}{vm_suffix(vm)}"
+                    return fmt_vvname(f"{name}.vv")
+                return f"vop(fun6=0b{funct6:06b}).vv {vname(vd)}, {vname(vs2)}, {vname(vs1)}{vm_suffix(vm)}"
 
             if sub == 0b100:  # OPIVX
                 name = int_map.get(funct6)
@@ -617,37 +672,37 @@ class DecodeBlock():
                 name = mv_perm_map.get(funct6)
                 if name:
                     return fmt_vx(f"{name}.vx")
-                return f"vop(fun6=0b{funct6:06b}).vx {V(vd)}, {V(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
+                return f"vop(fun6=0b{funct6:06b}).vx {vname(vd)}, {vname(vs2)}, {xname(vs1)}{vm_suffix(vm)}"
 
             if sub == 0b011:  # OPIVI
                 name = int_map.get(funct6)
                 if name:
                     return fmt_vi(f"{name}.vi")
-                return f"vop(fun6=0b{funct6:06b}).vi {V(vd)}, {V(vs2)}, {get_bits(inst,19,15)}{vm_suffix(vm)}"
+                return f"vop(fun6=0b{funct6:06b}).vi {vname(vd)}, {vname(vs2)}, {get_bits(inst,19,15)}{vm_suffix(vm)}"
 
             if sub == 0b001:  # OPFVV
                 name = fp_map.get(funct6)
                 if name:
-                    return fmt_vv(f"{name}.vv")
-                return f"vfop(fun6=0b{funct6:06b}).vv {V(vd)}, {V(vs2)}, {V(vs1)}{vm_suffix(vm)}"
+                    return fmt_vvname(f"{name}.vv")
+                return f"vfop(fun6=0b{funct6:06b}).vv {vname(vd)}, {vname(vs2)}, {vname(vs1)}{vm_suffix(vm)}"
 
             if sub == 0b101:  # OPFVF
                 name = fp_map.get(funct6)
                 if name:
                     return fmt_vx(f"{name}.vf")
-                return f"vfop(fun6=0b{funct6:06b}).vf {V(vd)}, {V(vs2)}, {fname(vs1)}{vm_suffix(vm)}"
+                return f"vfop(fun6=0b{funct6:06b}).vf {vname(vd)}, {vname(vs2)}, {fname(vs1)}{vm_suffix(vm)}"
 
             if sub in (0b010, 0b110):  # OPMVV / OPMVX
                 name = mv_perm_map.get(funct6)
                 if name:
                     if sub == 0b010:
-                        return fmt_vv(f"{name}.vv")
+                        return fmt_vvname(f"{name}.vv")
                     else:
                         return fmt_vx(f"{name}.vx")
                 # 兜底
                 form = ".vv" if sub == 0b010 else ".vx"
-                rhs = f"{V(vs2)}, {V(vs1)}" if sub == 0b010 else f"{V(vs2)}, {xname(vs1)}"
-                return f"vperm(fun6=0b{funct6:06b}){form} {V(vd)}, {rhs}{vm_suffix(vm)}"
+                rhs = f"{vname(vs2)}, {vname(vs1)}" if sub == 0b010 else f"{vname(vs2)}, {xname(vs1)}"
+                return f"vperm(fun6=0b{funct6:06b}){form} {vname(vd)}, {rhs}{vm_suffix(vm)}"
 
             # 兜底（理应不会走到）
             return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
@@ -683,27 +738,27 @@ class DecodeBlock():
                 if is_load:
                     # mask/whole/fault-only-first
                     if lumop == 0b01001:
-                        return f"vlm.v {V(rd)}, {hex(off)}({base})"
+                        return f"vlm.v {vname(rd)}, {hex(off)}({base})"
                     if lumop == 0b00100:
-                        return f"vl1r.v {V(rd)}, {hex(off)}({base})"
+                        return f"vl1r.v {vname(rd)}, {hex(off)}({base})"
                     if lumop == 0b10000:
                         # fault-only-first
                         if eew is None:
                             return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
-                        return f"vle{eew}.ff.v {V(rd)}, {hex(off)}({base})"
+                        return f"vle{eew}.ff.v {vname(rd)}, {hex(off)}({base})"
                     # regular unit-stride
                     if eew is None:
                         return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
-                    return f"vle{eew}.v {V(rd)}, {hex(off)}({base}){'' if vm==1 else ''}"
+                    return f"vle{eew}.v {vname(rd)}, {hex(off)}({base}){'' if vm==1 else ''}"
                 else:
                     sumop = get_bits(inst, 24, 20)
                     if sumop == 0b01001:
-                        return f"vsm.v {V(rs2)}, {hex(off)}({base})"
+                        return f"vsm.v {vname(rs2)}, {hex(off)}({base})"
                     if sumop == 0b00100:
-                        return f"vs1r.v {V(rs2)}, {hex(off)}({base})"
+                        return f"vs1r.v {vname(rs2)}, {hex(off)}({base})"
                     if eew is None:
                         return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
-                    return f"vse{eew}.v {V(rs2)}, {hex(off)}({base})"
+                    return f"vse{eew}.v {vname(rs2)}, {hex(off)}({base})"
 
             if mop == 0b01:
                 # strided: rs1 holds base, stride in rs2 (load) / rs2 data (store), stride in imm[??] → 规范：stride 在 rs2?（按 spec 为 x寄存器 rs2）
@@ -711,9 +766,9 @@ class DecodeBlock():
                     return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
                 # 载入：vlseXX.v vd, (rs1), rs2 ; 存储：vsseXX.v vs2, (rs1), rs2
                 if is_load:
-                    return f"vlse{eew}.v {V(rd)}, ({base}), {xname(rs2)}"
+                    return f"vlse{eew}.v {vname(rd)}, ({base}), {xname(rs2)}"
                 else:
-                    return f"vsse{eew}.v {V(rs2)}, ({base}), {xname(get_bits(inst, 24, 20))}"
+                    return f"vsse{eew}.v {vname(rs2)}, ({base}), {xname(get_bits(inst, 24, 20))}"
 
             if mop in (0b10, 0b11):
                 # indexed-ordered (10) / indexed-unordered (11)
@@ -722,9 +777,9 @@ class DecodeBlock():
                 stem = "vloxei" if mop == 0b10 else "vluxei"
                 stem_s = "vsoxei" if mop == 0b10 else "vsuxei"
                 if is_load:
-                    return f"{stem}{eew}.v {V(rd)}, ({base}), {V(rs2)}"
+                    return f"{stem}{eew}.v {vname(rd)}, ({base}), {vname(rs2)}"
                 else:
-                    return f"{stem_s}{eew}.v {V(rs2)}, ({base}), {V(get_bits(inst, 24, 20))}"
+                    return f"{stem_s}{eew}.v {vname(rs2)}, ({base}), {vname(get_bits(inst, 24, 20))}"
 
             # Segmented（nf>0）：单位步长多字段（vlseg<nf>eXX / vsseg<nf>eXX）或 whole-register 多组
             if nf != 0:
@@ -732,9 +787,9 @@ class DecodeBlock():
                 if eew is None:
                     return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
                 if is_load:
-                    return f"vlseg{n}e{eew}.v {V(rd)}..{V((rd + n - 1) % 32)}, {hex(off)}({base})"
+                    return f"vlseg{n}e{eew}.v {vname(rd)}..{vname((rd + n - 1) % 32)}, {hex(off)}({base})"
                 else:
-                    return f"vsseg{n}e{eew}.v {V(rs2)}..{V((rs2 + n - 1) % 32)}, {hex(off)}({base})"
+                    return f"vsseg{n}e{eew}.v {vname(rs2)}..{vname((rs2 + n - 1) % 32)}, {hex(off)}({base})"
 
             # 兜底
             return f".instr {{{hex(inst & 0xFFFFFFFF)}}}"
@@ -743,201 +798,332 @@ class DecodeBlock():
 # Compressed (C) decoder (subset)
 # ---------------------------
 
-def decode_c(inst: int) -> str:
-    op = get_bits(inst, 1, 0)
-    funct3 = get_bits(inst, 15, 13)
-    XR = xname
+    def decode_c(self, inst: int, pc: int = -1, order: int = -1) -> tuple[str, InstrUnit]:
+        op = get_bits(inst, 1, 0)
+        funct3 = get_bits(inst, 15, 13)
+        XR = xname
 
-    def crx(x):  # compressed register (adds 8)
-        return f"x{8 + x}"
+        instr = InstrUnit()
 
-    # Quadrant 0 (op=00)
-    if op == 0b00:
-        if funct3 == 0b000:
-            # c.addi4spn -> addi rd', x2, nzuimm
-            n = (get_bits(inst, 12, 11) << 4) | (get_bits(inst, 10, 7) << 6) | (get_bits(inst, 6, 6) << 2) | (get_bits(inst, 5, 5) << 3)
-            if n == 0:
-                return f".instr {{{hex(inst & 0xFFFF)}}}"
-            rd_ = 8 + get_bits(inst, 4, 2)
-            return f"addi {XR(rd_)}, x2, {n}"
-        if funct3 == 0b010:
-            # c.lw rd', uimm(xr1')
-            u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
-            rd_ = 8 + get_bits(inst, 4, 2)
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            return f"lw {XR(rd_)}, {u}({XR(rs1_)})"
-        if funct3 == 0b011:
-            # c.ld
-            u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
-            rd_ = 8 + get_bits(inst, 4, 2)
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            return f"ld {XR(rd_)}, {u}({XR(rs1_)})"
-        if funct3 == 0b110:
-            # c.sw
-            u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
-            rs2_ = 8 + get_bits(inst, 4, 2)
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            return f"sw {XR(rs2_)}, {u}({XR(rs1_)})"
-        if funct3 == 0b111:
-            # c.sd
-            u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
-            rs2_ = 8 + get_bits(inst, 4, 2)
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            return f"sd {XR(rs2_)}, {u}({XR(rs1_)})"
+        instr.dataflow.pc = pc
+        instr.order = order
 
-    # Quadrant 1 (op=01)
-    if op == 0b01:
-        if funct3 == 0b000:
-            imm = sign_extend((get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2), 6)
-            rd = get_bits(inst, 11, 7)
-            return "nop" if (rd == 0 and imm == 0) else f"addi {XR(rd)}, {XR(rd)}, {imm}"
-        if funct3 == 0b010:
-            rd = get_bits(inst, 11, 7)
-            imm = sign_extend((get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2), 6)
-            return f"li {XR(rd)}, {imm}"
-        if funct3 == 0b011:
-            rd = get_bits(inst, 11, 7)
-            imm = sign_extend((get_bits(inst, 12, 12) << 17) | (get_bits(inst, 6, 2) << 12), 18)
-            if rd == 2:
-                return f"addi x2, x2, {imm}"  # c.addi16sp
-            return f"lui {XR(rd)}, {imm}"
-        if funct3 == 0b001:
-            # c.jal (RV32), treat as jal x1
-            off = sign_extend(
-                (get_bits(inst, 12, 12) << 11) | (get_bits(inst, 8, 8) << 10) |
-                (get_bits(inst, 10, 9) << 8) | (get_bits(inst, 6, 6) << 7) |
-                (get_bits(inst, 7, 7) << 6) | (get_bits(inst, 2, 2) << 5) |
-                (get_bits(inst, 11, 11) << 4) | (get_bits(inst, 5, 3) << 1), 12
-            )
-            return f"jal x1, {off}"
-        if funct3 == 0b101:
-            # c.j
-            off = sign_extend(
-                (get_bits(inst, 12, 12) << 11) | (get_bits(inst, 8, 8) << 10) |
-                (get_bits(inst, 10, 9) << 8) | (get_bits(inst, 6, 6) << 7) |
-                (get_bits(inst, 7, 7) << 6) | (get_bits(inst, 2, 2) << 5) |
-                (get_bits(inst, 11, 11) << 4) | (get_bits(inst, 5, 3) << 1), 12
-            )
-            return f"j {off}"
-        if funct3 == 0b110:
-            # c.beqz
-            off = sign_extend(
-                (get_bits(inst, 12, 12) << 8) | (get_bits(inst, 6, 5) << 6) |
-                (get_bits(inst, 2, 2) << 5) | (get_bits(inst, 11, 10) << 3) |
-                (get_bits(inst, 4, 3) << 1), 9
-            )
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            return f"beq {XR(rs1_)}, x0, {off}"
-        if funct3 == 0b111:
-            # c.bnez
-            off = sign_extend(
-                (get_bits(inst, 12, 12) << 8) | (get_bits(inst, 6, 5) << 6) |
-                (get_bits(inst, 2, 2) << 5) | (get_bits(inst, 11, 10) << 3) |
-                (get_bits(inst, 4, 3) << 1), 9
-            )
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            return f"bne {XR(rs1_)}, x0, {off}"
-        if funct3 == 0b100:
-            subop = get_bits(inst, 11, 10)
-            rs1_ = 8 + get_bits(inst, 9, 7)
-            rs2_ = 8 + get_bits(inst, 4, 2)
-            if subop == 0b00:
-                # c.srli
-                sh = (get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2)
-                return f"srli {XR(rs1_)}, {XR(rs1_)}, {sh}"
-            if subop == 0b01:
-                sh = (get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2)
-                return f"srai {XR(rs1_)}, {XR(rs1_)}, {sh}"
-            if subop == 0b10:
+        def crx(x):  # compressed register (adds 8)
+            return f"x{8 + x}"
+        
+        def frx(x):  # compressed register (adds 8)
+            return f"x{8 + x}"
+
+        # Quadrant 0 (op=00) addi
+        if op == 0b00:
+            if funct3 == 0b000:
+                # c.addi4spn -> addi rd', x2(sp), nzuimm
+                n = (get_bits(inst, 12, 11) << 4) | (get_bits(inst, 10, 7) << 6) | (get_bits(inst, 6, 6) << 2) | (get_bits(inst, 5, 5) << 3)
+                rd_ = 8 + get_bits(inst, 4, 2)
+                instr.alu = ExecType.ALU
+                instr.dataflow.rs1 = 2
+                instr.dataflow.imm = n
+                instr.dataflow.rd = rd_
+                instr.req.rs1 = True
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                if n == 0:
+                    raise NotImplementedError("Decoder: Illegal Instruction")
+                    return f".instr {{{hex(inst & 0xFFFF)}}}", instr
+                
+                return f"c.addi4spn {XR(rd_)}, {n}", instr
+            if funct3 == 0b001:
+                # c.fld rd', uimm(xr1') -> lw rd, offset(rs1)
+                u = (get_bits(inst, 6, 5) << 6) | (get_bits(inst, 12, 10) << 3)
+                rd_ = 8 + get_bits(inst, 4, 2)
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.LSU
+                instr.op = AluOpType.BYPASS
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rd = rd_
+                instr.req.rs1 = True
+                instr.lsu_op = LsuOpType.LW
+                instr.dataflow.offset = u
+                return f"c.lw {XR(rd_)}, {u}({XR(rs1_)})", instr
+            if funct3 == 0b010:
+                # c.lw rd', uimm(xr1') -> lw rd, offset(rs1)
+                u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
+                rd_ = 8 + get_bits(inst, 4, 2)
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.LSU
+                instr.op = AluOpType.BYPASS
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rd = rd_
+                instr.req.rs1 = True
+                instr.lsu_op = LsuOpType.LW
+                instr.dataflow.offset = u
+                return f"c.lw {XR(rd_)}, {u}({XR(rs1_)})", instr
+            if funct3 == 0b011:
+                # c.ld
+                u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
+                rd_ = 8 + get_bits(inst, 4, 2)
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.LSU
+                instr.op = AluOpType.BYPASS
+                instr.req.rs1 = True
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rd = rd_
+                instr.lsu_op = LsuOpType.LD
+                instr.dataflow.offset = u
+                return f"c.ld {XR(rd_)}, {u}({XR(rs1_)})", instr
+            if funct3 == 0b110:
+                # c.sw rs2′, offset(rs1′) -> sw rs2, offset(rs1)
+                u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
+                rs2_ = 8 + get_bits(inst, 4, 2)
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.LSU
+                instr.op = AluOpType.BYPASS
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rs2 = rs2_
+                instr.req.rs1 = True
+                instr.req.rs2 = True
+                instr.lsu_op = LsuOpType.SW
+                instr.dataflow.offset = u
+                return f"c.sw {XR(rs2_)}, {u}({XR(rs1_)})", instr
+            if funct3 == 0b111:
+                # c.sd
+                u = (get_bits(inst, 5, 5) << 6) | (get_bits(inst, 12, 10) << 3) | (get_bits(inst, 6, 6) << 2)
+                rs2_ = 8 + get_bits(inst, 4, 2)
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.LSU
+                instr.op = AluOpType.BYPASS
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rs2 = rs2_
+                instr.req.rs1 = True
+                instr.req.rs2 = True
+                instr.lsu_op = LsuOpType.SD
+                instr.dataflow.offset = u
+                return f"c.sd {XR(rs2_)}, {u}({XR(rs1_)})"
+
+        # Quadrant 1 (op=01)
+        if op == 0b01:
+            if funct3 == 0b000:
                 imm = sign_extend((get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2), 6)
-                return f"andi {XR(rs1_)}, {XR(rs1_)}, {imm}"
-            if subop == 0b11:
-                fun = get_bits(inst, 6, 5)
-                m = {0: "sub", 1: "xor", 2: "or", 3: "and"}
-                if fun in m:
-                    return f"{m[fun]} {XR(rs1_)}, {XR(rs1_)}, {XR(rs2_)}"
+                rd = get_bits(inst, 11, 7)
+                instr.alu = ExecType.ALU
+                instr.op = AluOpType.ADD
+                instr.dataflow.rs1 = rd
+                instr.dataflow.rd = rd
+                instr.req.rs1 = True
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                instr.dataflow.imm = imm
+                if rd == 0 and imm == 0:
+                    return "c.nop", instr
+                else:
+                    return f"c.addi {XR(rd)}, {imm}", instr
+            if funct3 == 0b010:
+                rd = get_bits(inst, 11, 7)
+                imm = sign_extend((get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2), 6)
+                instr.alu = ExecType.ALU
+                instr.op = AluOpType.BYPASS
+                instr.dataflow.rd = rd
+                instr.mux_A = AluPortAType.IMM
+                instr.dataflow.imm = imm
+                return f"c.li {XR(rd)}, {imm}", instr
+            if funct3 == 0b011:
+                rd = get_bits(inst, 11, 7)
+                imm = sign_extend((get_bits(inst, 12, 12) << 17) | (get_bits(inst, 6, 2) << 12), 18)
+                if rd == 2:
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType.BYPASS
+                    instr.dataflow.rd = rd
+                    instr.mux_A = AluPortAType.IMM
+                    instr.dataflow.imm = imm
+                    return f"c.addi16sp x2, {imm}", instr
+                instr.alu = ExecType.ALU
+                instr.op = AluOpType.ADD
+                instr.dataflow.rd = rd
+                instr.dataflow.rs1 = rd
+                instr.mux_A = AluPortAType.RS1
+                instr.mux_B = AluPortBType.IMM
+                instr.dataflow.imm = imm
+                return f"c.lui {XR(rd)}, {imm}", instr
+            if funct3 == 0b001:
+                # c.jal (RV32), treat as jal x1
+                off = sign_extend(
+                    (get_bits(inst, 12, 12) << 11) | (get_bits(inst, 8, 8) << 10) |
+                    (get_bits(inst, 10, 9) << 8) | (get_bits(inst, 6, 6) << 7) |
+                    (get_bits(inst, 7, 7) << 6) | (get_bits(inst, 2, 2) << 5) |
+                    (get_bits(inst, 11, 11) << 4) | (get_bits(inst, 5, 3) << 1), 12
+                )
+                raise NotImplementedError("Decoder: Illegal Instruction")
+                return f"c.jal x1, {off}"
+            if funct3 == 0b101:
+                # c.j
+                off = sign_extend(
+                    (get_bits(inst, 12, 12) << 11) | (get_bits(inst, 8, 8) << 10) |
+                    (get_bits(inst, 10, 9) << 8) | (get_bits(inst, 6, 6) << 7) |
+                    (get_bits(inst, 7, 7) << 6) | (get_bits(inst, 2, 2) << 5) |
+                    (get_bits(inst, 11, 11) << 4) | (get_bits(inst, 5, 3) << 1), 12
+                )
+                instr.alu = ExecType.ALU
+                instr.op = AluOpType.ADD
+                instr.dataflow.rd = 0
+                instr.dataflow.imm = 4
+                instr.dataflow.offset = off
+                instr.mux_A = AluPortAType.PC
+                instr.mux_B = AluPortBType.IMM
+                instr.pc_effect.valid = True
+                instr.pc_effect.mux_A = PCEffectPortAType.PC
+                return f"c.j {off}", instr
+            if funct3 == 0b110:
+                # c.beqz
+                off = sign_extend(
+                    (get_bits(inst, 12, 12) << 8) | (get_bits(inst, 6, 5) << 6) |
+                    (get_bits(inst, 2, 2) << 5) | (get_bits(inst, 11, 10) << 3) |
+                    (get_bits(inst, 4, 3) << 1), 9
+                )
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.BRANCH
+                instr.op = BranchOpType.EQ
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rs2 = 0
+                instr.dataflow.offset = off
+                instr.pc_effect.valid = True
+                instr.pc_effect.mux_A = PCEffectPortAType.PC
+                return f"c.beqz {XR(rs1_)}, {off}", instr
+            if funct3 == 0b111:
+                # c.bnez
+                off = sign_extend(
+                    (get_bits(inst, 12, 12) << 8) | (get_bits(inst, 6, 5) << 6) |
+                    (get_bits(inst, 2, 2) << 5) | (get_bits(inst, 11, 10) << 3) |
+                    (get_bits(inst, 4, 3) << 1), 9
+                )
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                instr.alu = ExecType.BRANCH
+                instr.op = BranchOpType.NE
+                instr.dataflow.rs1 = rs1_
+                instr.dataflow.rs2 = 0
+                instr.dataflow.offset = off
+                instr.pc_effect.valid = True
+                instr.pc_effect.mux_A = PCEffectPortAType.PC
+                return f"c.bnez {XR(rs1_)}, {off}"
+            if funct3 == 0b100:
+                subop = get_bits(inst, 11, 10)
+                rs1_ = 8 + get_bits(inst, 9, 7)
+                rs2_ = 8 + get_bits(inst, 4, 2)
+                if subop == 0b00:
+                    # c.srli
+                    sh = (get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2)
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType.SRL
+                    instr.dataflow.rs1 = rs1_
+                    instr.dataflow.rd = rs1_
+                    instr.dataflow.imm = sh
+                    instr.req.rs1 = True
+                    instr.mux_A = AluPortAType.RS1
+                    instr.mux_B = AluPortBType.IMM
+                    return f"c.srli {XR(rs1_)}, {sh}", instr
+                if subop == 0b01:
+                    sh = (get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2)
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType.SRA
+                    instr.dataflow.rs1 = rs1_
+                    instr.dataflow.rd = rs1_
+                    instr.req.rs1 = True
+                    instr.dataflow.imm = sh
+                    instr.mux_A = AluPortAType.RS1
+                    instr.mux_B = AluPortBType.IMM
+                    return f"c.srai {XR(rs1_)}, {sh}", instr
+                if subop == 0b10:
+                    imm = sign_extend((get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2), 6)
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType.AND
+                    instr.dataflow.rs1 = rs1_
+                    instr.dataflow.rd = rs1_
+                    instr.req.rs1 = True
+                    instr.dataflow.imm = imm
+                    instr.mux_A = AluPortAType.RS1
+                    instr.mux_B = AluPortBType.IMM
+                    return f"c.andi {XR(rs1_)}, {imm}"
+                if subop == 0b11:
+                    fun = get_bits(inst, 6, 5)
+                    m = {0: "c.sub", 1: "c.xor", 2: "c.or", 3: "c.and"}
+                    instr_op = {0: AluOpType.SUB, 1: AluOpType.XOR, 2: AluOpType.OR, 3: AluOpType.AND}
+                    instr.alu = ExecType.ALU
+                    instr.op = AluOpType.AND
+                    instr.dataflow.rs1 = rs1_
+                    instr.dataflow.rs2 = instr_op[fun]
+                    instr.dataflow.rd = rs1_
+                    instr.req.rs1 = True
+                    instr.req.rs2 = True
+                    instr.mux_A = AluPortAType.RS1
+                    instr.mux_B = AluPortBType.RS2
+                    return f"{m[fun]} {XR(rs1_)}, {XR(rs2_)}", instr
 
-    # Quadrant 2 (op=10)
-    if op == 0b10:
-        if funct3 == 0b000:
-            # c.slli
-            rd = get_bits(inst, 11, 7)
-            sh = (get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2)
-            return f"slli {XR(rd)}, {XR(rd)}, {sh}"
-        if funct3 == 0b010:
-            # c.lwsp
-            rd = get_bits(inst, 11, 7)
-            u = (get_bits(inst, 3, 2) << 6) | (get_bits(inst, 12, 12) << 5) | (get_bits(inst, 6, 4) << 2)
-            return f"lw {XR(rd)}, {u}(x2)"
-        if funct3 == 0b011:
-            # c.ldsp
-            rd = get_bits(inst, 11, 7)
-            u = (get_bits(inst, 4, 2) << 6) | (get_bits(inst, 12, 12) << 5) | (get_bits(inst, 6, 5) << 3)
-            return f"ld {XR(rd)}, {u}(x2)"
-        if funct3 == 0b100:
-            rs2 = get_bits(inst, 6, 2)
-            rd = get_bits(inst, 11, 7)
-            if rs2 == 0:
+        # Quadrant 2 (op=10)
+        if op == 0b10:
+            if funct3 == 0b000:
+                # c.slli
+                rd = get_bits(inst, 11, 7)
+                sh = (get_bits(inst, 12, 12) << 5) | get_bits(inst, 6, 2)
+                return f"slli {XR(rd)}, {XR(rd)}, {sh}"
+            if funct3 == 0b010:
+                # c.lwsp
+                rd = get_bits(inst, 11, 7)
+                u = (get_bits(inst, 3, 2) << 6) | (get_bits(inst, 12, 12) << 5) | (get_bits(inst, 6, 4) << 2)
+                return f"lw {XR(rd)}, {u}(x2)"
+            if funct3 == 0b011:
+                # c.ldsp
+                rd = get_bits(inst, 11, 7)
+                u = (get_bits(inst, 4, 2) << 6) | (get_bits(inst, 12, 12) << 5) | (get_bits(inst, 6, 5) << 3)
+                return f"ld {XR(rd)}, {u}(x2)"
+            if funct3 == 0b100:
+                rs2 = get_bits(inst, 6, 2)
+                rd = get_bits(inst, 11, 7)
+                if rs2 == 0:
+                    if rd == 0:
+                        return f".instr {{{hex(inst & 0xFFFF)}}}"
+                    # c.jr
+                    return f"jalr x0, 0({XR(rd)})"
                 if rd == 0:
                     return f".instr {{{hex(inst & 0xFFFF)}}}"
-                # c.jr
-                return f"jalr x0, 0({XR(rd)})"
-            if rd == 0:
-                return f".instr {{{hex(inst & 0xFFFF)}}}"
-            if rs2 == 1 and rd == 1:
-                # c.jalr (rare path)
-                return f"jalr x1, 0(x1)"
-            if rd == 1 and rs2 != 0:
-                # c.add
-                return f"add {XR(rd)}, {XR(rd)}, {XR(get_bits(inst, 6, 2))}"
-            # c.mv
-            return f"mv {XR(rd)}, {XR(get_bits(inst, 6, 2))}"
-        if funct3 == 0b110:
-            # c.swsp
-            rs2 = get_bits(inst, 6, 2)
-            u = (get_bits(inst, 8, 7) << 6) | (get_bits(inst, 12, 9) << 2)
-            return f"sw {XR(rs2)}, {u}(x2)"
-        if funct3 == 0b111:
-            # c.sdsp
-            rs2 = get_bits(inst, 6, 2)
-            u = (get_bits(inst, 9, 7) << 6) | (get_bits(inst, 12, 10) << 3)
-            return f"sd {XR(rs2)}, {u}(x2)"
+                if rs2 == 1 and rd == 1:
+                    # c.jalr (rare path)
+                    return f"jalr x1, 0(x1)"
+                if rd == 1 and rs2 != 0:
+                    # c.add
+                    return f"add {XR(rd)}, {XR(rd)}, {XR(get_bits(inst, 6, 2))}"
+                # c.mv
+                return f"mv {XR(rd)}, {XR(get_bits(inst, 6, 2))}"
+            if funct3 == 0b110:
+                # c.swsp
+                rs2 = get_bits(inst, 6, 2)
+                u = (get_bits(inst, 8, 7) << 6) | (get_bits(inst, 12, 9) << 2)
+                return f"sw {XR(rs2)}, {u}(x2)"
+            if funct3 == 0b111:
+                # c.sdsp
+                rs2 = get_bits(inst, 6, 2)
+                u = (get_bits(inst, 9, 7) << 6) | (get_bits(inst, 12, 10) << 3)
+                return f"sd {XR(rs2)}, {u}(x2)"
 
-    return f".instr {{{hex(inst & 0xFFFF)}}}"
+            return f".instr {{{hex(inst & 0xFFFF)}}}"
 
-# ---------------------------
-# Public API
-# ---------------------------
+    # ---------------------------
+    # Public API
+    # ---------------------------
 
-def decode_to_human(opcode: int) -> (bool, str) :
-    """
-    Decode a single RISC-V instruction (compressed 16b or 32b) into a human-readable string.
-    Unknown patterns -> '.instr {0x...}'.
-    Supports a broad subset of I/M/A/C/F/D/V; extend tables as needed.
+    def decode_to_human(self, opcode: int, pc: int = -1, order: int = -1) -> tuple[bool, tuple[str, InstrUnit | None]] :
+        """
+        Decode a single RISC-V instruction (compressed 16b or 32b) into a human-readable string.
+        Unknown patterns -> '.instr {0x...}'.
+        Supports a broad subset of I/M/A/C/F/D/V; extend tables as needed.
 
-    Args:
-        opcode (int): raw instruction bits (LSB aligned). For C, pass 16-bit value; for 32b pass full 32-bit value.
+        Args:
+            opcode (int): raw instruction bits (LSB aligned). For C, pass 16-bit value; for 32b pass full 32-bit value.
 
-    Returns:
-        str
-    """
-    # Decide by low2 bits
-    if is_compressed(opcode):
-        # only keep low 16 bits for safety
-        return True, decode_c(opcode & 0xFFFF)
-    else:
-        return False, decode_32(opcode & 0xFFFFFFFF)
-    
-def decode(inst: int) -> (bool, Literal[""], ):
-    opc = get_bits(inst, 6, 0)
-    rd = get_bits(inst, 11, 7)
-    funct3 = get_bits(inst, 14, 12)
-    rs1 = get_bits(inst, 19, 15)
-    rs2 = get_bits(inst, 24, 20)
-    funct7 = get_bits(inst, 31, 25)
-
-    # ---- LUI/AUIPC ----
-    if opc == 0x37:
-        return f"lui {XR(rd)}, {hex(imm_u(inst))}"
-    if opc == 0x17:
-        return f"auipc {XR(rd)}, {hex(imm_u(inst))}"
+        Returns:
+            str
+        """
+        # Decide by low2 bits
+        if is_compressed(opcode):
+            # only keep low 16 bits for safety
+            return True, self.decode_c(opcode & 0xFFFF, pc, order)
+        else:
+            return False, self.decode_32(opcode & 0xFFFFFFFF, pc, order)

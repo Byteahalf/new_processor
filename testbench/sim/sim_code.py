@@ -1,21 +1,17 @@
 import os, sys
 import numpy as np
 from .register import Register, RegisterGroup
-from . import decode
+from .decode import DecodeBlock
 from .util import *
 from .instr_unit import InstrUnit
 
 MEM_FILE = f"{os.path.dirname(__file__)}/../binary/main.mem"
 
-def addw(rs1: int, imm: int) -> int:
-    """模拟 RISC-V ADDIW 指令"""
-    # 1. 截取 rs1 低 32 位并作为有符号数
-    low32 = to_signed32(rs1)
-    # 2. 执行 32 位加法
-    result32 = to_signed32(low32 + imm)
-    # 3. 符号扩展到 64 位
-    return sign_extend_32_to_64(result32)
+def addr2index(addr):
+    return addr * 2
 
+def index2addr(index):
+    return (index >> 1)
 
 def core(mem):
     ############
@@ -25,7 +21,7 @@ def core(mem):
     fpr = Register(32, zero=False)
     vpr = Register(32, zero=False)
 
-    regs = RegisterGroup(gpr, fpr, vpr)
+    decoder = DecodeBlock()
 
     ##############
     # DEASSEMBLY #
@@ -41,9 +37,9 @@ def core(mem):
             opcode = mem[i]
         else:
             opcode = (mem[i+1] << 16) + mem[i]
-        compress, code = decode.decode_to_human(opcode)
+        compress, code = decoder.decode_to_human(opcode, addr)
         opcode = opcode & 0xffff if compress else opcode
-        human_code.append(f"{addr:08x}: {opcode:08x} {code}")
+        human_code.append(f"{addr:08x}: {opcode:08x} {code[0]}")
         if compress:
             i += 1
             addr += 2
@@ -53,47 +49,31 @@ def core(mem):
     with open("main.asm", "w", encoding='utf-8') as f:
         f.write('\n'.join(human_code))
 
-    #######
-    # RUN #
-    #######
-
-    # DECODE -> DECODE_PENDING (OPT) -> EXEC -> WRITEBACK
-    # 从后往前更新
-
-    # ALU
-    # A: { RS1, PC, MEMRD, CSR_RD }
-    # B: { RS2, IMM, RS1 }
-    # R: { GPR, CSR_WR, PC, LSU, }
-
     next_addr = 0
-
+    addr = 0
+    # 所有的名称都是结果
+    decode_fifo = []
+    rob_fifo = []
 
 
     while(True):
-        # Write Back Update
-        for instr in write_back_list:
-            for dst in instr.dst:
-                pass
-
-        # Exec Update
-        for instr in exec_list:
-            otype = instr.op.otype
-            op = instr.op.op
-            if otype == 'FLOAT':
-                if op == 'ADD':
-                    instr
-            elif otype == 'INT':
-                if op == 'ADD':
-                     instr.write_dst(wrap(rs1 + op2, xlen))
-                if op == 'ADDW':
-                    instr.write_dst(addw(instr.read_reg(0) &  + instr.read_reg(1)))
-                elif op == 'SUB':
-                    instr.write_dst(instr.read_reg(0) - instr.read_reg(1))
-                elif op == 'ADD'
-            elif instr.op.otype == 'VECTOR':
-                pass
+        # [2] 分配 Rob
+        for i in decode_fifo:
+            if
+        # [1] 译码 4发射
+        for i in range(4):
+            index = addr2index(next_addr)
+            opcode = (mem[index + 1] << 16) | mem[index]
+            compress, code = decoder.decode_to_human(opcode)
+            if compress:
+                next_addr += 2
             else:
-                raise NotImplementedError("Execution type error.")
+                next_addr += 4
+            if code[1] is None:
+                raise NotImplementedError("Decode: Undecoded Instruction")
+            decode_fifo.append(code[1])
+        
+
 
 
              

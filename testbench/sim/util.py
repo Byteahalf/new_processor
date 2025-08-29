@@ -49,7 +49,7 @@ def mask(n: int) -> int:
     return (1 << n) - 1
 
 
-def sext(val: int, bits: int) -> int:
+def sext(val: int, bits: int = 64) -> int:
     """
     将整数 val 截断到 bits 位，并解释为有符号数
     返回 Python int（可能是负数）
@@ -59,7 +59,7 @@ def sext(val: int, bits: int) -> int:
     return (val ^ sign) - sign    # 符号扩展
 
 
-def zext(val: int, bits: int) -> int:
+def zext(val: int, bits: int = 64) -> int:
     """
     将整数 val 截断到 bits 位，并解释为无符号数
     返回非负整数
