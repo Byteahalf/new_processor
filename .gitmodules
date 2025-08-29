@@ -1,0 +1,6 @@
+[submodule "rtl/fpnew"]
+	path = rtl/fpnew
+	url = https://github.com/openhwgroup/cvfpu.git
+[submodule "xiangshan/XiangShan"]
+	path = xiangshan/XiangShan
+	url = https://github.com/OpenXiangShan/XiangShan.git
