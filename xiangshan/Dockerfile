@@ -8,6 +8,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         verilator \
+        time \
+        git \
+        make \
         gtkwave \
         cmake \
         ninja-build \
@@ -27,8 +30,16 @@ RUN curl -fsSL https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-
     ln -s /usr/local/sbt/bin/sbt /usr/local/bin/sbt && \
     rm -f /tmp/sbt.tgz
 
+# Change sh link
+RUN ln -sf /bin/bash /bin/sh
+
 # Optional: tune sbt memory (adjust as needed)
 ENV SBT_OPTS="-Xms512m -Xmx4g -Xss4m -XX:MaxMetaspaceSize=1g"
+
+ARG MILL_VERSION=0.12.3
+RUN curl -L https://github.com/com-lihaoyi/mill/releases/download/${MILL_VERSION}/${MILL_VERSION} -o /usr/local/bin/mill && \
+    chmod +x /usr/local/bin/mill && \
+    mill version
 
 # Create a non-root user (uid/gid 1000) and workspace
 ARG USER_NAME=builder

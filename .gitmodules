@@ -4,3 +4,9 @@
 [submodule "xiangshan/XiangShan"]
 	path = xiangshan/XiangShan
 	url = https://github.com/OpenXiangShan/XiangShan.git
+[submodule "xiangshan/NEMU"]
+	path = xiangshan/NEMU
+	url = https://github.com/OpenXiangShan/NEMU.git
+[submodule "xiangshan/nexus-am"]
+	path = xiangshan/nexus-am
+	url = https://github.com/OpenXiangShan/nexus-am.git
